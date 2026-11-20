@@ -26,6 +26,7 @@ from flask import (Flask, abort, flash, redirect, render_template, request,
 
 import engine
 import importer
+import review
 import storage
 
 app = Flask(__name__)
@@ -121,22 +122,35 @@ def batch(batch_id):
     info = load_batch_or_404(connection, batch_id)
     definition = info["definition"]
     households = storage.list_households(connection, batch_id)
+    confirmations = storage.list_confirmations(connection, batch_id)
+    rules = review.explicit_rules(definition)
 
     summaries = []
     for household in households:
         stored = storage.load_answers(connection, household["id"])
-        steps = engine.walk_stored(definition, stored)
-        missing = engine.first_missing(steps)
+        state = review.household_state(definition, stored)
+        missing = engine.first_missing(state["steps"])
+        confirmation = confirmations.get(household["id"])
+        confirmed = (confirmation is not None and
+                     confirmation["signature"] == state["signature"])
         summaries.append({
             "id": household["id"],
             "household_no": household["household_no"],
-            "route": engine.route(steps),
+            "route": engine.route(state["steps"]),
             "missing": missing["qid"] if missing else None,
-            "answered": sum(1 for step in steps if step["answered"]),
+            "answered": sum(1 for step in state["steps"] if step["answered"]),
+            "eligible": state["eligible"],
+            "ineligible_reason": state["reason"],
+            "confirmed": confirmed,
+            "stale": confirmation is not None and not confirmed,
+            "confirmed_at": confirmation["confirmed_at"]
+            if confirmation else None,
+            "triggered": sorted(state["triggered"]),
         })
     connection.close()
     return render_template("batch.html", batch=info, households=summaries,
-                           question_count=len(definition))
+                           question_count=len(definition), rules=rules,
+                           max_rules=review.MAX_SELECTED_RULES)
 
 
 @app.get("/batch/<int:batch_id>/household/<int:household_id>")
@@ -148,8 +162,9 @@ def household(batch_id, household_id):
         connection.close()
         abort(404)
     stored = storage.load_answers(connection, household_id)
+    confirmation = storage.get_confirmation(connection, household_id)
     connection.close()
-    return _render_household(info, record, stored)
+    return _render_household(info, record, stored, confirmation)
 
 
 @app.post("/batch/<int:batch_id>/household/<int:household_id>")
@@ -163,10 +178,26 @@ def save_household(batch_id, household_id):
 
     submitted = collect_submitted(request.form)
     stored = storage.load_answers(connection, household_id)
+    before = review.household_state(info["definition"], stored)
     try:
         changes, ignored = engine.plan_changes(
             info["definition"], stored, submitted)
-        storage.save_answers(connection, household_id, changes)
+        # Any successful edit that alters the path or the effective answers
+        # invalidates the existing confirmation, in the same transaction as
+        # the answer write (so a failed save keeps the old confirmation).
+        if changes:
+            staged = dict(stored)
+            for key, value in changes.items():
+                if value is None:
+                    staged.pop(key, None)
+                else:
+                    staged[key] = value
+            after = review.household_state(info["definition"], staged)
+            revoked = after["signature"] != before["signature"]
+        else:
+            revoked = False
+        storage.save_answers(connection, household_id, changes,
+                             revoke_confirmation=revoked)
     except engine.DefinitionError as error:
         connection.close()
         flash("保存失败：%s（网页和下载仍显示上次保存的答卷）" % error, "error")
@@ -180,13 +211,48 @@ def save_household(batch_id, household_id):
                                 household_id=household_id))
 
     current = storage.load_answers(connection, household_id)
+    confirmation = storage.get_confirmation(connection, household_id)
     connection.close()
     if ignored:
         flash("题 %s 不在当前路径上，未保存" % "、".join(dict.fromkeys(ignored)),
               "warning")
     saved = sum(1 for value in changes.values() if value is not None)
     flash("已保存 %d 处修改" % saved, "success")
-    return _render_household(info, record, current)
+    if revoked:
+        flash("本次修改改变了路径或有效答案，该户的复核确认已作废，请重新核对后确认。",
+              "warning")
+    return _render_household(info, record, current, confirmation)
+
+
+@app.post("/batch/<int:batch_id>/household/<int:household_id>/confirm")
+def confirm_household(batch_id, household_id):
+    """Confirm the household against the paper roll.
+
+    The form carries the state signature of the page the reviewer opened.
+    If the saved path/answers have changed since then, the confirmation is
+    rejected and the reviewer must reopen the page and look again.
+    """
+    connection = get_db()
+    info = load_batch_or_404(connection, batch_id)
+    record = storage.get_household(connection, batch_id, household_id)
+    if record is None:
+        connection.close()
+        abort(404)
+    stored = storage.load_answers(connection, household_id)
+    state = review.household_state(info["definition"], stored)
+    submitted_sig = request.form.get("state_signature", "")
+    if submitted_sig != state["signature"]:
+        connection.close()
+        flash("打开页面后该户的路径或有效答案已被修改，已拒绝确认，请重新查看。",
+              "error")
+        return redirect(url_for("household", batch_id=batch_id,
+                                household_id=household_id))
+    storage.upsert_confirmation(connection, household_id,
+                                state["signature"])
+    connection.close()
+    flash("已确认户号 %s 的路径与有效答案。" % record["household_no"], "success")
+    return redirect(url_for("household", batch_id=batch_id,
+                            household_id=household_id))
 
 
 def collect_submitted(form):
@@ -206,9 +272,13 @@ def collect_submitted(form):
     return entries
 
 
-def _render_household(info, record, stored):
+def _render_household(info, record, stored, confirmation=None):
     definition = info["definition"]
-    steps = engine.walk_stored(definition, stored)
+    state = review.household_state(definition, stored)
+    steps = state["steps"]
+    confirmed = (confirmation is not None and
+                 confirmation["signature"] == state["signature"])
+    stale = confirmation is not None and not confirmed
     return render_template(
         "household.html",
         batch=info,
@@ -216,7 +286,60 @@ def _render_household(info, record, stored):
         steps=steps,
         missing=engine.first_missing(steps),
         others=engine.other_path_answers(definition, stored, steps),
+        state_signature=state["signature"],
+        eligible=state["eligible"],
+        ineligible_reason=state["reason"],
+        triggered=sorted(state["triggered"]),
+        rules=review.explicit_rules(definition),
+        confirmed=confirmed,
+        stale=stale,
+        confirmed_at=confirmation["confirmed_at"] if confirmation else None,
     )
+
+
+@app.get("/batch/<int:batch_id>/coverage")
+def coverage(batch_id):
+    """Minimum-reviewer plan for the selected explicit jump rules.
+
+    Every answer and confirmation used here is read in one deferred
+    transaction: the same saved snapshot for the whole calculation, even if
+    another reviewer edits households while it runs.
+    """
+    connection = get_db()
+    info = load_batch_or_404(connection, batch_id)
+    definition = info["definition"]
+    rules = review.explicit_rules(definition)
+    try:
+        selected = review.parse_selection(
+            request.args.getlist("rule"), len(rules))
+        quota = review.parse_quota(request.args.get("quota"))
+    except review.ReviewError as error:
+        connection.close()
+        flash(str(error), "error")
+        return redirect(url_for("batch", batch_id=batch_id))
+
+    connection.execute("BEGIN")
+    try:
+        households = storage.list_households(connection, batch_id)
+        confirmations = storage.list_confirmations(connection, batch_id)
+        snapshot = []
+        for household in households:
+            confirmation = confirmations.get(household["id"])
+            snapshot.append({
+                "id": household["id"],
+                "household_no": household["household_no"],
+                "stored": storage.load_answers(connection, household["id"]),
+                "confirmed_signature": confirmation["signature"]
+                if confirmation else None,
+            })
+        plan = review.plan_coverage(definition, snapshot, selected, quota)
+    finally:
+        connection.rollback()
+        connection.close()
+
+    return render_template(
+        "coverage.html", batch=info, plan=plan,
+        selected=[rules[idx] for idx in selected], quota=quota)
 
 
 @app.get("/batch/<int:batch_id>/export.csv")

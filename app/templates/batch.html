@@ -15,10 +15,42 @@
 </section>
 
 <section class="card">
+  <h2>跳题录入复核</h2>
+  <p class="muted">勾选本次要抽查的显式跳转规则（同题不同选项分开计，1～{{ max_rules }} 条），
+    填入还能复核多少户。只有<strong>答完当前路径且单选答案均合法</strong>的户才计入覆盖；
+    先计入已确认户，再给出覆盖其余规则所需的最少待复核户。</p>
+  {% if rules %}
+  <form method="get" action="{{ url_for('coverage', batch_id=batch.id) }}">
+    <ul class="rule-list">
+      {% for rule in rules %}
+        <li>
+          <label class="option rule-option">
+            <input type="checkbox" name="rule" value="{{ rule.index }}">
+            <span class="qid">{{ rule.qid }}</span>
+            <span class="rule-label">「{{ rule.answer }}」跳至 {{ rule.target }}</span>
+            <span class="muted">{{ rule.title }}</span>
+          </label>
+        </li>
+      {% endfor %}
+    </ul>
+    <div class="quota-row">
+      <label class="quota">还能复核（户）
+        <input type="number" name="quota" min="0" step="1" placeholder="留空表示不限">
+      </label>
+      <button type="submit">计算复核覆盖</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">本问卷没有显式跳转规则，无需跳题复核。</p>
+  {% endif %}
+</section>
+
+<section class="card">
   <table>
     <thead>
       <tr>
-        <th>户号</th><th>当前路径</th><th>已答</th><th>首个漏答题</th><th></th>
+        <th>户号</th><th>当前路径</th><th>已答</th><th>首个漏答题</th>
+        <th>可计入覆盖</th><th>复核状态</th><th></th>
       </tr>
     </thead>
     <tbody>
@@ -35,7 +67,25 @@
             {% endif %}
           </td>
           <td>
-            <a href="{{ url_for('household', batch_id=batch.id, household_id=item.id) }}">改答</a>
+            {% if item.eligible %}
+              <span class="badge ok">可计入</span>
+            {% else %}
+              <span class="badge missing" title="{{ item.ineligible_reason }}">不可计入</span>
+              <div class="muted reason">{{ item.ineligible_reason }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {% if item.confirmed %}
+              <span class="badge ok">已确认</span>
+              <div class="muted reason">{{ item.confirmed_at }}</div>
+            {% elif item.stale %}
+              <span class="badge missing">确认已作废</span>
+            {% else %}
+              <span class="muted">待复核</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="{{ url_for('household', batch_id=batch.id, household_id=item.id) }}">改答 / 复核</a>
           </td>
         </tr>
       {% endfor %}

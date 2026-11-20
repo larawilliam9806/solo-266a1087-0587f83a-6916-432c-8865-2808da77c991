@@ -30,6 +30,13 @@ CREATE TABLE IF NOT EXISTS answers (
     value TEXT NOT NULL,
     PRIMARY KEY (household_id, prefix, qid)
 );
+
+CREATE TABLE IF NOT EXISTS confirmations (
+    household_id INTEGER PRIMARY KEY
+        REFERENCES households(id) ON DELETE CASCADE,
+    signature TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 """
 
 
@@ -141,14 +148,20 @@ def load_answers(connection, household_id):
             for row in rows}
 
 
-def save_answers(connection, household_id, changes):
+def save_answers(connection, household_id, changes, revoke_confirmation=False):
     """Persist ``{key: value_or_None}`` for one household.
 
     ``key`` is ``(prefix_tuple, qid)``; ``None`` deletes.  All changes are
     written in a single transaction, so a failure leaves the previous answers
-    fully intact.
+    fully intact.  When ``revoke_confirmation`` is true the household's review
+    confirmation is dropped in the same transaction, so a failed save also
+    keeps the previous confirmation alive.
     """
     with transaction(connection):
+        if revoke_confirmation:
+            connection.execute(
+                "DELETE FROM confirmations WHERE household_id = ?",
+                (household_id,))
         for (prefix, qid), value in changes.items():
             key = _prefix_key(prefix)
             if value is None:
@@ -163,6 +176,38 @@ def save_answers(connection, household_id, changes):
                     "ON CONFLICT (household_id, prefix, qid) "
                     "DO UPDATE SET value = excluded.value",
                     (household_id, key, qid, value))
+
+
+def get_confirmation(connection, household_id):
+    """The stored confirmation row, or ``None`` (unconfirmed / revoked)."""
+    row = connection.execute(
+        "SELECT household_id, signature, confirmed_at "
+        "FROM confirmations WHERE household_id = ?",
+        (household_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_confirmations(connection, batch_id):
+    """Map household id to ``{"signature", "confirmed_at"}`` for a batch."""
+    rows = connection.execute(
+        "SELECT c.household_id, c.signature, c.confirmed_at "
+        "FROM confirmations c JOIN households h ON h.id = c.household_id "
+        "WHERE h.batch_id = ?", (batch_id,)).fetchall()
+    return {row["household_id"]: {"signature": row["signature"],
+                                  "confirmed_at": row["confirmed_at"]}
+            for row in rows}
+
+
+def upsert_confirmation(connection, household_id, signature):
+    """Confirm a household against its current state signature."""
+    with transaction(connection):
+        connection.execute(
+            "INSERT INTO confirmations (household_id, signature) "
+            "VALUES (?, ?) "
+            "ON CONFLICT (household_id) DO UPDATE SET "
+            "signature = excluded.signature, "
+            "confirmed_at = datetime('now', 'localtime')",
+            (household_id, signature))
 
 
 def db_path_from_env():

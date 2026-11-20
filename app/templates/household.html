@@ -12,6 +12,35 @@
         {% endfor %}
       </p>
     </div>
+    <div class="confirm-box">
+      {% if confirmed %}
+        <span class="badge ok">已确认</span>
+        <div class="muted reason">确认于 {{ confirmed_at }}</div>
+      {% elif stale %}
+        <span class="badge missing">原确认已作废</span>
+        <div class="muted reason">确认后路径或有效答案已变，须重看后重新确认</div>
+      {% else %}
+        <span class="muted">待复核</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="review-meta">
+    {% if eligible %}
+      <span class="badge ok">可计入覆盖：路径已答完且单选答案均合法</span>
+    {% else %}
+      <span class="badge missing">不可计入覆盖：{{ ineligible_reason }}</span>
+    {% endif %}
+    {% if triggered %}
+      <div class="muted reason">本户实际触发的显式跳转：
+        {% for idx in triggered %}
+          {% set rule = rules[idx] %}
+          <span class="chip">{{ rule.label }}</span>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="muted reason">本户未触发任何显式跳转规则。</div>
+    {% endif %}
   </div>
 </section>
 
@@ -85,6 +114,20 @@
     <a class="button secondary" href="{{ url_for('export_csv', batch_id=batch.id) }}">下载分析用 CSV</a>
   </form>
   <p class="muted">提示：切换前面的单选题后，请先保存再用新路径继续填写；未保存的输入不会跟随路径移动。</p>
+</section>
+
+<section class="card confirm-card">
+  <h2>对照纸卷确认</h2>
+  <p class="muted">请对照纸卷核对上方当前路径与各题有效答案。确认后该户才会计入批次页的跳题覆盖计算；
+    若打开本页后路径或有效答案被修改过，系统会拒绝确认并提示重新查看。
+    成功改答只要改变了路径或有效答案（即使之后改回），原确认即作废，须重新审核；保存失败则保留原确认。</p>
+  <form method="post"
+        action="{{ url_for('confirm_household', batch_id=batch.id, household_id=household.id) }}">
+    <input type="hidden" name="state_signature" value="{{ state_signature }}">
+    <button type="submit" {% if confirmed %}class="secondary"{% endif %}>
+      {% if confirmed %}重新确认当前所见路径与答案{% else %}确认路径与有效答案无误{% endif %}
+    </button>
+  </form>
 </section>
 
 {% if others %}

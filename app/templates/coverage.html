@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}复核覆盖方案 · {{ batch.name }}{% endblock %}
+{% block content %}
+<section class="card">
+  <p class="muted"><a href="{{ url_for('batch', batch_id=batch.id) }}">← 返回 {{ batch.name }}</a></p>
+  <h1>跳题复核覆盖方案</h1>
+  <p class="muted">本方案基于计算开始时同一份已保存的答卷与确认状态。计算之后若有改答或确认，
+    请回到批次页重新计算。每户按其实际触发的跳转计算，同题不同选项分开计。</p>
+
+  <h2>本次勾选的 {{ plan.rules|length }} 条规则</h2>
+  <ul class="rule-list compact">
+    {% for rule in plan.rules %}
+      <li>
+        <span class="qid">{{ rule.qid }}</span>
+        <span class="rule-label">「{{ rule.answer }}」跳至 {{ rule.target }}</span>
+        <span class="muted">{{ rule.title }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+  <p class="muted">
+    批次共 {{ plan.eligible_count }} 户可计入覆盖，其中 {{ plan.confirmed_count }} 户已确认；
+    待复核候选户 {{ plan.pending_candidate_count }} 户。
+    名额：{% if plan.quota is none %}不限{% else %}{{ plan.quota }} 户{% endif %}。
+  </p>
+</section>
+
+<section class="card">
+  <h2>第一步：已确认户先计入（{{ plan.confirmed_households|length }} 户）</h2>
+  {% if plan.confirmed_households %}
+  <table>
+    <thead><tr><th>户号</th><th>覆盖的规则</th></tr></thead>
+    <tbody>
+      {% for item in plan.confirmed_households %}
+        <tr>
+          <td class="strong">
+            <a href="{{ url_for('household', batch_id=batch.id, household_id=item.id) }}">{{ item.household_no }}</a>
+            <span class="badge ok">已确认</span>
+          </td>
+          <td>
+            {% for rule in item.rules %}
+              <span class="chip">{{ rule.label }}</span>
+            {% else %}
+              <span class="muted">未触发本次勾选的规则</span>
+            {% endfor %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">没有已确认且可计入覆盖的户。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>第二步：覆盖其余规则所需的最少待复核户</h2>
+  {% if plan.all_coverable_covered %}
+    <div class="flash success">勾选的规则已全部由已确认户覆盖，无需再复核新户。</div>
+  {% else %}
+    <p class="muted">还需覆盖 {{ plan.rules|length }} 条规则中未被已确认户覆盖的部分；
+      下列 {{ plan.needed }} 户是覆盖它们所需的最少户数（按每户实际触发的规则去重）。</p>
+    {% if plan.minimum_households %}
+    <table>
+      <thead><tr><th>顺序</th><th>户号</th><th>该户覆盖的规则</th><th>名额</th></tr></thead>
+      <tbody>
+        {% for item in plan.minimum_households %}
+          <tr class="{{ 'over-quota' if not item.within_quota else '' }}">
+            <td>{{ item.order }}</td>
+            <td class="strong">
+              <a href="{{ url_for('household', batch_id=batch.id, household_id=item.id) }}">{{ item.household_no }}</a>
+            </td>
+            <td>
+              {% for rule in item.rules %}
+                <span class="chip">{{ rule.label }}</span>
+              {% endfor %}
+            </td>
+            <td>
+              {% if item.within_quota %}
+                <span class="badge ok">名额内</span>
+              {% else %}
+                <span class="badge missing">超名额</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if plan.shortfall %}
+      <div class="flash error">
+        名额不足：覆盖全部有候选户的规则最少需要 {{ plan.needed }} 户，
+        当前名额 {% if plan.quota is none %}不限{% else %}{{ plan.quota }} 户{% endif %}，
+        <strong>还差 {{ plan.shortfall }} 户</strong>。
+        表中「超名额」的户在现有名额内无法安排。
+      </div>
+    {% endif %}
+  {% endif %}
+
+  {% if plan.missing_rules %}
+  <h2>缺样：没有候选户的规则</h2>
+  <div class="flash warning">
+    下列规则在当前已保存的答卷中，没有任何<strong>可计入覆盖的待复核户</strong>能够触发
+    （已确认户未覆盖，且其余户或未答完、或含不合法单选答案、或不会走到该选项）：
+    <ul class="missing-list">
+      {% for rule in plan.missing_rules %}
+        <li><span class="chip">{{ rule.label }}</span> <span class="muted">{{ rule.title }}</span></li>
+      {% endfor %}
+    </ul>
+    这些规则无法通过复核现有户完成抽查，需补样或先清洗相关户的答卷。
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
